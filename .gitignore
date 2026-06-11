@@ -1,0 +1,8 @@
+node_modules/
+out/
+logs/
+*.log
+# testkit / wallet local state
+.midnight-level-db/
+midnight-level-db/
+*.fifo

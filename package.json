@@ -1,0 +1,42 @@
+{
+  "name": "exploring-native-shielded-token-indexing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reproducible deploy -> mint -> burn of a Midnight ShieldedFungibleToken on a local v8 stack, decoding each raw transaction to show exactly what a public indexer can observe.",
+  "scripts": {
+    "reproduce": "tsx src/reproduce.ts",
+    "decode": "tsx src/decode.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-js": "2.5.1",
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/ledger-v8": "8.1.0",
+    "@midnight-ntwrk/midnight-js-contracts": "4.1.1",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-network-id": "4.1.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "4.1.1",
+    "@midnight-ntwrk/midnight-js-types": "4.1.1",
+    "@midnight-ntwrk/midnight-js-utils": "4.1.1",
+    "@midnight-ntwrk/testkit-js": "4.1.1",
+    "@midnight-ntwrk/wallet-sdk": "1.1.0",
+    "@scure/bip39": "^1.2.1",
+    "pino": "^9.7.0",
+    "pino-pretty": "^13.0.0",
+    "rxjs": "^7.8.1",
+    "testcontainers": "^10.28.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.7",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
