@@ -6,7 +6,10 @@
   "description": "Reproducible deploy -> mint -> burn of a Midnight ShieldedFungibleToken on a local v8 stack, decoding each raw transaction to show exactly what a public indexer can observe.",
   "scripts": {
     "reproduce": "tsx src/reproduce.ts",
+    "hidden-burn": "tsx src/hidden-burn.ts",
     "decode": "tsx src/decode.ts",
+    "compile": "bash scripts/compile.sh",
+    "compile:disclose-probe": "compact compile +0.31.0 --skip-zk contracts/experiments/disclose-probe.compact build/disclose-probe",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,0 +1,36 @@
+// Disclose probe (compiler experiment — not part of the token).
+//
+// Each circuit calls ONE shielded coin op on a witness-derived (parameter)
+// coin/amount WITHOUT `disclose`, to show the Compact compiler forces
+// disclosure for all three coin spend/receive primitives:
+//   receiveShielded, sendImmediateShielded, sendShielded.
+//
+// It is SUPPOSED to fail to compile. Reproduce with the normal compact command:
+//   compact compile +0.31.0 --skip-zk contracts/experiments/disclose-probe.compact build/disclose-probe
+// You get a "potential witness-value disclosure must be declared but is not"
+// error for each of the three calls. This is why a contract-mediated burn can
+// never hide the coin value: spending/receiving a coin publishes a
+// commitment/nullifier derived from it. See the README "Experiment" section.
+
+pragma language_version >= 0.23.0;
+import CompactStandardLibrary;
+
+export circuit probeReceive(coin: ShieldedCoinInfo): [] {
+  receiveShielded(coin);
+}
+
+export circuit probeSendImmediate(
+  coin: ShieldedCoinInfo,
+  to: Either<ZswapCoinPublicKey, ContractAddress>,
+  amount: Uint<128>
+): [] {
+  sendImmediateShielded(coin, to, amount);
+}
+
+export circuit probeSendShielded(
+  coin: QualifiedShieldedCoinInfo,
+  to: Either<ZswapCoinPublicKey, ContractAddress>,
+  amount: Uint<128>
+): [] {
+  sendShielded(coin, to, amount);
+}
