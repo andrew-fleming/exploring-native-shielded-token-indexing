@@ -43,6 +43,47 @@ Evidence: [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDEN-BURN-VIEW.md) (amount hidden,
 `pnpm hidden-burn`) vs [`out/INDEXER-VIEW.md`](./out/INDEXER-VIEW.md) (contract
 burn, amount leaks, `pnpm reproduce`).
 
+## Supply auditability: does the fold match the contract counter?
+
+A second question: can a public indexer **recompute** a shielded token's supply,
+and does it agree with the contract's own `totalSupply()` counter? `pnpm
+verify-supply` runs one stack through deploy → mint → contract burn → hidden burn
+→ protocol burn and, after each step, compares three numbers:
+
+- **contract `totalSupply()`** — the contract's own counter (a ledger cell),
+- **fold `−Σ deltas[tt]`** — what an indexer recomputes from public zswap deltas,
+- **true circulating** — what is actually spendable, by construction of the run.
+
+| Step | tx `delta[tt]` | fold `−Σδ` | contract `totalSupply()` | true circulating |
+|---|---|---|---|---|
+| mint 1,000,000 | −1,000,000 | 1,000,000 | 1,000,000 | 1,000,000 |
+| contract burn 400,000 | 0 | **1,000,000** | 600,000 | 600,000 |
+| hidden burn 200,000 | 0 | **1,000,000** | 600,000 | 400,000 |
+| protocol burn 400,000 | **+400,000** | 600,000 | 600,000 | 0 |
+
+All rows verified **PASS** on a live stack. Three findings:
+
+1. **Supply = `−Σ deltas[tt]`.** After the mint, the indexer fold equals the
+   minted amount. (The `shieldedMints` effect carries the mint amount too — but
+   keyed by a *different* token type than the zswap color; see note below.)
+2. **A "protocol burn" is public and real.** A hand-built one-input / zero-output
+   zswap offer (a positive imbalance) is *accepted* by the node; the surplus is
+   destroyed and the burned amount is plaintext in `deltas[tt] = +P` — no contract
+   call, no record of who. This is the one burn the fold actually sees.
+3. **Dead-coin burns are invisible to the fold.** Both the contract burn and the
+   hidden burn leave the coin sitting in the pool (net delta 0), so the fold stays
+   at 1,000,000 while the contract counter and the real circulating supply move.
+   Neither the fold nor `totalSupply()` tracks real circulating supply — each is an
+   upper bound that misses a *different* set of burns.
+
+> **Two token-type keys.** `rawTokenType(domain, contractAddress)` equals the coin
+> **color** (the zswap delta key). The `shieldedMints` mint effect is keyed by a
+> separate derived value. The supply fold keys on the color; the mint cross-check
+> sums `shieldedMints`. The report prints both.
+
+Output: [`out/SUPPLY-AUDIT.md`](./out/SUPPLY-AUDIT.md) (committed sample:
+[`SAMPLE-SUPPLY-AUDIT.md`](./SAMPLE-SUPPLY-AUDIT.md)).
+
 ## Prerequisites
 
 - **Docker** running (the script brings up node + indexer + proof-server as
@@ -64,6 +105,22 @@ pnpm reproduce
 
 (or `npm install && npm run reproduce`)
 
+Other entry points (same vendored contract + local stack):
+
+```bash
+pnpm hidden-burn      # mint via contract, then burn outside it (amount stays hidden)
+pnpm verify-supply    # the supply-auditability scenario (5 steps, PASS/FAIL matrix)
+```
+
+If testkit's container log-wait is flaky in your environment (it can report
+"Log stream ended … Started not received" within ~1s on a healthy stack), run the
+self-managed variants instead, which bring the stack up with plain `docker compose`:
+
+```bash
+bash scripts/run-hidden-burn.sh      # -> pnpm hidden-burn
+bash scripts/run-verify-supply.sh    # -> pnpm verify-supply
+```
+
 The first run pulls the Docker images (a few minutes). A full run takes roughly
 8–12 minutes: container startup, wallet sync, then one ZK proof per transaction.
 When it finishes you get a summary like:
@@ -84,11 +141,13 @@ byte sizes are roughly stable.) A committed example of the generated report is i
 
 ## What you get (in `out/`)
 
-| File | Contents |
-|---|---|
-| `INDEXER-VIEW.md` | Human-readable report: per-tx public view + a public-vs-hidden summary |
-| `1-deploy.hex`, `2-mint.hex`, `3-burn.hex` | The exact raw bytes submitted on-chain |
-| `*.decode.txt` | Full structured decode of each tx (transcript effects, Zswap offers, ledger dump) |
+| File | Contents | Written by |
+|---|---|---|
+| `INDEXER-VIEW.md` | Per-tx public view + a public-vs-hidden summary | `reproduce` |
+| `HIDDEN-BURN-VIEW.md` | The direct (amount-hidden) burn, decoded | `hidden-burn` |
+| `SUPPLY-AUDIT.md` | Supply PASS/FAIL matrix + per-tx delta fold + protocol-burn finding | `verify-supply` |
+| `<n>-<kind>.hex` | The exact raw bytes submitted on-chain (deploy/mint/burn/hidden-burn/protocol-burn) | all |
+| `*.decode.txt` | Full structured decode of each tx (transcript effects, Zswap offers, ledger dump) | all |
 
 Re-decode any captured tx on its own:
 
@@ -188,10 +247,13 @@ exactly that and decodes the result; see [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDE
 |---|---|
 | `src/reproduce.ts` | Orchestrator: start local stack → wallet → deploy → mint → burn → decode → report |
 | `src/hidden-burn.ts` | Variant orchestrator: mint via the contract, then burn by a direct wallet → burn-address transfer (amount stays hidden). Decodes to `out/HIDDEN-BURN-VIEW.md` |
-| `scripts/run-hidden-burn.sh` | Brings the `compose.yml` stack up with plain `docker compose`, waits for health, injects ports, and runs `hidden-burn` (avoids testkit's flaky log-wait) |
+| `src/verify-supply.ts` | Supply-audit orchestrator: deploy → mint → contract burn → hidden burn → protocol burn; per-step PASS/FAIL matrix to `out/SUPPLY-AUDIT.md` |
+| `src/supply.ts` | Pure delta-fold: `deltaForType`, `shieldedMintsForType`, `foldSupply` over decoded txs (also a CLI for offline folding of captured `.hex`) |
+| `scripts/run-hidden-burn.sh` | Brings the `compose.yml` stack up with plain `docker compose`, injects ports, runs `hidden-burn` (avoids testkit's flaky log-wait) |
+| `scripts/run-verify-supply.sh` | Same self-managed-stack wrapper, for `verify-supply` |
 | `src/wallet-provider.ts` | `WalletProvider`/`MidnightProvider` (balance + submit); captures each submitted tx's raw bytes |
 | `src/providers.ts` | Assembles the midnight-js providers (indexer, proof, zk-config, private-state) |
-| `src/contract.ts` | Deploy / join / mint / burn against the vendored contract |
+| `src/contract.ts` | Deploy / join / mint / burn + `totalSupply()` read against the vendored contract |
 | `src/wallet-utils.ts` | Fund/sync waits, incl. waiting for a minted coin to become spendable before burn |
 | `src/decode.ts` | Deserializes raw tx bytes into the public/indexer view (also a standalone CLI) |
 | `compose.yml` | The local v8 stack testkit brings up (public Docker Hub images) |
@@ -210,11 +272,15 @@ local stacks. The wallet is built from a prefunded dev-preset genesis seed
 | `TOKEN_NAME` | `OZ Test Token` | token name |
 | `TOKEN_SYMBOL` | `OZT` | token symbol |
 | `MINT_AMOUNT` | `1000000` | amount to mint |
-| `BURN_AMOUNT` | `400000` | amount to burn (must be ≤ mint) |
+| `BURN_AMOUNT` | `400000` | amount to (contract-)burn (must be ≤ mint) |
+| `HIDDEN_BURN_AMOUNT` | `200000` | `verify-supply` only: hidden-burn amount (must satisfy `B + H ≤ M`) |
+| `SOFT_ASSERT` | `1` | `verify-supply` only: collect FAILs into the report (`0` = exit non-zero on a measured-cell miss) |
 | `DEBUG_LEVEL` | `info` | pino log level (`debug` for sync detail) |
 
 ```bash
-MINT_AMOUNT=5000 BURN_AMOUNT=5000 pnpm reproduce   # full burn, no change
+MINT_AMOUNT=5000 BURN_AMOUNT=5000 pnpm reproduce              # full burn, no change
+MINT_AMOUNT=900 BURN_AMOUNT=300 HIDDEN_BURN_AMOUNT=300 \
+  bash scripts/run-verify-supply.sh                           # protocol burn P = 300
 ```
 
 ## Rebuilding the contract from source (optional)
