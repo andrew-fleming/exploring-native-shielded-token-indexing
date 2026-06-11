@@ -4,6 +4,10 @@
 import { randomBytes } from "node:crypto";
 import { CompiledContract } from "@midnight-ntwrk/compact-js";
 import {
+	createCircuitContext,
+	dummyContractAddress,
+} from "@midnight-ntwrk/compact-runtime";
+import {
 	deployContract,
 	findDeployedContract,
 } from "@midnight-ntwrk/midnight-js-contracts";
@@ -107,5 +111,35 @@ export class ShieldedFungibleToken {
 			`Burned: sent=${result.sent.value} change=${change} (tx ${txData.public.txHash})`,
 		);
 		return result;
+	}
+
+	/**
+	 * Read the contract's `_totalSupply` (public ledger cell 2n, a Uint128)
+	 * WITHOUT submitting a transaction. Fetches the latest contract state from
+	 * the indexer and runs the read-only `totalSupply()` circuit against it.
+	 *
+	 * The generated `ledger()` view only exposes `nonce`/`domain`, so the
+	 * counter has to come from the circuit rather than a ledger field.
+	 */
+	async totalSupply(): Promise<bigint> {
+		const contractState = await this.providers.publicDataProvider.queryContractState(
+			this.addressHex,
+		);
+		if (!contractState) {
+			throw new Error(`No contract state found at ${this.addressHex}`);
+		}
+		// The zswap/coin-public-key arg is unused by a ledger-only read; any valid
+		// coin public key works. `contractState.data` is the ChargedState.
+		const coinPublicKey = this.providers.walletProvider.getCoinPublicKey();
+		const context = createCircuitContext(
+			dummyContractAddress(),
+			coinPublicKey as never,
+			contractState.data as never,
+			{},
+		);
+		const { result } = new (Contract as new (w: unknown) => any)({}).circuits.totalSupply(
+			context,
+		);
+		return result as bigint;
 	}
 }
