@@ -13,6 +13,36 @@ The compiled contract + ZK keys are vendored, so no Compact compiler is needed:
 deploy ──▶ mint (1,000,000) ──▶ burn (400,000, change 600,000) ──▶ decode all 3 txs ──▶ out/INDEXER-VIEW.md
 ```
 
+## TL;DR — can you hide the burnt amount of a shielded token?
+
+**Yes, but only if you burn *outside* the contract.** A contract-mediated burn
+always reveals the amount to the indexer. A direct wallet → burn-address Zswap
+transfer hides it inside a Pedersen commitment. We proved both ends on a live
+local v8 stack and decoded the raw bytes.
+
+| | Mint (via contract) | Contract `burn` | Direct wallet burn |
+|---|---|---|---|
+| Path | `mint` circuit | `burn` circuit | plain Zswap transfer to the zero coin key |
+| Amount visible to indexer | **yes** (`shieldedMints` effect) | **yes** (`disclose`d into the public VM transcript) | **no** (only a Pedersen commitment) |
+| Coin owner / recipient | hidden | hidden | hidden |
+| Contract can count it (`totalBurned`) | n/a | yes | **no** (invisible to the contract) |
+| `disclose` required in Compact | yes | yes | n/a (no contract code runs) |
+
+**Why a contract can't hide it.** Spending or receiving a shielded coin inside a
+contract (`receiveShielded`, `sendImmediateShielded`, `sendShielded`) builds a
+public commitment/nullifier from the coin and writes its value into the public VM
+transcript. The Compact compiler *forces* `disclose` on all three. Removing the
+total-supply counter does not change this. We tried, and it fails to compile with
+53 disclosure errors (see
+[the experiment below](#experiment-can-removing-total-supply-let-us-drop-disclose-from-burn)).
+
+**The trade-off.** A hidden burn never touches the contract, so `totalBurned` can
+only ever be a lower bound on circulating supply.
+
+Evidence: [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDEN-BURN-VIEW.md) (amount hidden,
+`pnpm hidden-burn`) vs [`out/INDEXER-VIEW.md`](./out/INDEXER-VIEW.md) (contract
+burn, amount leaks, `pnpm reproduce`).
+
 ## Prerequisites
 
 - **Docker** running (the script brings up node + indexer + proof-server as
@@ -90,11 +120,75 @@ So both mint and burn leak the *amount* here; only the coin *owners* stay
 hidden. A future amount-private burn would need to avoid disclosing the coin
 value and change to the public transcript.
 
+## Experiment: can removing total supply let us drop `disclose` from burn?
+
+Short answer: **no.** The `disclose` on the burn is not there for the supply
+counter. It is forced by the shielded coin operations themselves.
+
+Reproduce it with a tiny standalone probe,
+[`contracts/experiments/disclose-probe.compact`](./contracts/experiments/disclose-probe.compact),
+which calls each coin spend/receive primitive on a witness value (a circuit
+parameter) WITHOUT `disclose`, using the normal compact command:
+
+```bash
+pnpm compile:disclose-probe
+# = compact compile +0.31.0 --skip-zk contracts/experiments/disclose-probe.compact build/disclose-probe
+```
+
+The compiler **rejects** it (`exit 255`). All three coin spend/receive
+primitives fail the same way — `receiveShielded`, `sendImmediateShielded`, and
+`sendShielded`:
+
+```
+Exception: disclose-probe.compact line 19 char 3:
+  potential witness-value disclosure must be declared but is not:
+    witness value potentially disclosed:
+      the value of parameter coin of exported circuit probeReceive
+    nature of the disclosure:
+      the call to standard-library circuit receiveShielded might disclose a link between a
+      coin receive and the coin with the commitment given by a hash of the witness value
+
+Exception: disclose-probe.compact line 27 char 3:
+    witness value: parameter coin of circuit probeSendImmediate
+    nature of the disclosure:
+      the call to standard-library circuit sendImmediateShielded might disclose a link between
+      a claim of nullifier and the coin with the nullifier given by a hash of the witness value
+
+Exception: disclose-probe.compact line 35 char 3:
+    witness value: parameter coin of circuit probeSendShielded
+    nature of the disclosure:
+      the call to standard-library circuit sendShielded might disclose a link between a claim
+      of nullifier and the coin with the nullifier given by a hash of the witness value
+```
+
+The same holds inside the real `ShieldedERC20.burn`: removing `_totalSupply`
+(the ledger field, its `totalSupply()` circuit, and the `_totalSupply = …`
+writes) and then dropping `disclose` from the coin ops makes it fail to compile
+with 53 such disclosure errors. The committed `contracts/` are left as the
+working originals; only the standalone probe is kept, as a minimal repro.
+
+**Why.** Spending or receiving a shielded coin inside a contract produces a
+public commitment and nullifier that are a hash *of the coin* — including its
+value. The compiler makes you `disclose` that the public commitment/nullifier is
+derived from the (private) coin. And the operation writes the coin value into
+the public VM transcript regardless: in the baseline burn the *change*-send
+carries no `disclose` yet `600000` still shows up as a literal. So in any
+contract-mediated burn the amount is public. **Total-supply accounting is
+irrelevant to it.**
+
+**The only way to hide a burnt amount** is to burn *outside* the contract: a
+plain wallet → burn-address Zswap transfer, where the value lives only inside a
+Pedersen commitment (hidden, like any user-to-user transfer). The trade-off is
+that the contract can no longer see or count it. `src/hidden-burn.ts` runs
+exactly that and decodes the result; see [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDEN-BURN-VIEW.md).
+
 ## How it works
 
 | File | Role |
 |---|---|
 | `src/reproduce.ts` | Orchestrator: start local stack → wallet → deploy → mint → burn → decode → report |
+| `src/hidden-burn.ts` | Variant orchestrator: mint via the contract, then burn by a direct wallet → burn-address transfer (amount stays hidden). Decodes to `out/HIDDEN-BURN-VIEW.md` |
+| `scripts/run-hidden-burn.sh` | Brings the `compose.yml` stack up with plain `docker compose`, waits for health, injects ports, and runs `hidden-burn` (avoids testkit's flaky log-wait) |
 | `src/wallet-provider.ts` | `WalletProvider`/`MidnightProvider` (balance + submit); captures each submitted tx's raw bytes |
 | `src/providers.ts` | Assembles the midnight-js providers (indexer, proof, zk-config, private-state) |
 | `src/contract.ts` | Deploy / join / mint / burn against the vendored contract |
@@ -127,13 +221,25 @@ MINT_AMOUNT=5000 BURN_AMOUNT=5000 pnpm reproduce   # full burn, no change
 
 The vendored `artifacts/` were produced by compiling `contracts/*.compact` with
 the Compact compiler. You do **not** need this to run the reproducer. To rebuild
-them you need the Compact toolchain (`compactc`) matching `compact-runtime`
-`0.16.0`, then point `ZK_CONFIG_PATH` (in `src/reproduce.ts`) at the rebuilt
-output. The import closure is:
+them you need the Compact toolchain (`compact`) matching `compact-runtime`
+`0.16.0`. The import closure is:
 
 ```
 ShieldedFungibleToken.compact → ShieldedERC20.compact → Utils.compact
 ```
+
+The sources are stored flat, but their imports assume a structured layout
+(`shielded-token/` + `openzeppelin/`), so `pnpm compile` stages them into that
+layout and runs the normal compact command:
+
+```bash
+pnpm compile               # full build (TS + zkir + proving keys) -> build/ShieldedFungibleToken
+pnpm compile -- --skip-zk  # fast: TS + zkir only, no proving keys
+```
+
+To use a rebuild at runtime, point `ZK_CONFIG_PATH` (in `src/reproduce.ts` /
+`src/hidden-burn.ts`) at `build/ShieldedFungibleToken`, or copy it over
+`artifacts/shielded-token/ShieldedFungibleToken`.
 
 ## Troubleshooting
 
