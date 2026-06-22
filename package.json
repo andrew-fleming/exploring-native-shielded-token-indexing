@@ -11,6 +11,8 @@
     "decode": "tsx src/decode.ts",
     "compile": "bash scripts/compile.sh",
     "compile:disclose-probe": "compact compile +0.31.0 --skip-zk contracts/experiments/disclose-probe.compact build/disclose-probe",
+    "compile:no-supply": "compact compile +0.31.0 contracts/experiments/NoSupplyToken.compact build/NoSupplyToken",
+    "no-supply-burn": "tsx src/no-supply-burn.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,0 +1,74 @@
+// No-supply burn experiment (NOT part of the token; a refutation harness).
+//
+// Purpose: test the README's claim that a contract-mediated burn "always
+// reveals the amount to the indexer" because the coin operations
+// (receiveShielded / sendImmediateShielded) are forced to carry `disclose`.
+//
+// This contract performs the EXACT SAME coin operations as
+// ShieldedERC20.burn, with the EXACT SAME compiler-required `disclose`
+// wrappers — but it has NO `_totalSupply` ledger cell, no `totalSupply()`
+// circuit, and NO public ledger write of `amount` anywhere. Per the Midnight
+// docs, `disclose()` is only a compiler permission marker; the actual
+// disclosure sink in ShieldedERC20.burn is the public-ledger write
+// `_totalSupply = _totalSupply - disclose(amount)`. If that is the real leak,
+// removing it should make the burned amount unrecoverable from the raw tx
+// bytes — even though the coin ops still (correctly) require `disclose`.
+//
+// The fact that this file COMPILES at all is the first data point: it proves
+// the coin-op `disclose` requirement is independent of the supply counter.
+// The decode of an actual burn tx is the second (see src/no-supply-burn.ts).
+
+pragma language_version >= 0.23.0;
+import CompactStandardLibrary;
+
+// Public state — note: NO `_totalSupply` field.
+export ledger _counter: Counter;
+export ledger _nonce: Bytes<32>;
+export sealed ledger _domain: Bytes<32>;
+export ledger _color: Bytes<32>;
+
+constructor(initNonce: Bytes<32>, domain_: Bytes<32>) {
+  _nonce = disclose(initNonce);
+  _domain = disclose(domain_);
+}
+
+circuit isZero(a: Bytes<32>): Boolean {
+  return a == pad(32, '');
+}
+
+export circuit color(): Bytes<32> {
+  return _color;
+}
+
+// Identical to ShieldedERC20.mint minus the `_totalSupply += amount` write.
+export circuit mint(recipient: Either<ZswapCoinPublicKey, ContractAddress>,
+                    amount: Uint<64>
+                    ): ShieldedCoinInfo {
+  _counter.increment(1);
+  const newNonce = evolveNonce(_counter, _nonce);
+  _nonce = newNonce;
+  const ret = mintShieldedToken(_domain, disclose(amount), _nonce, disclose(recipient));
+  if (isZero(_color)) {
+    _color = ret.color;
+  }
+  return ret;
+}
+
+// Identical to ShieldedERC20.burn EXCEPT the line
+//   _totalSupply = _totalSupply - disclose(amount);
+// has been removed. Every coin op keeps its compiler-required `disclose`.
+export circuit burn(coin: ShieldedCoinInfo, amount: Uint<128>): ShieldedSendResult {
+  assert(coin.color == _color, "NoSupplyToken: token not created from this contract");
+  assert(coin.value >= amount, "NoSupplyToken: insufficient token amount to burn");
+
+  receiveShielded(disclose(coin));
+  // <-- the only line removed vs ShieldedERC20.burn: the _totalSupply write.
+
+  const sendRes = sendImmediateShielded(disclose(coin), shieldedBurnAddress(), disclose(amount));
+  if (sendRes.change.is_some) {
+    const caller = left<ZswapCoinPublicKey, ContractAddress>(ownPublicKey());
+    sendImmediateShielded(sendRes.change.value, caller, sendRes.change.value.value);
+  }
+
+  return sendRes;
+}
