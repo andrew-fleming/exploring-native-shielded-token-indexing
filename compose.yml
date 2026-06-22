@@ -22,7 +22,13 @@ services:
       start_period: 10s
 
   indexer:
-    image: 'midnightntwrk/indexer-standalone:latest'
+    # Pinned: the `latest` tag drifted into the Cardano-bridge indexer line,
+    # whose bundled config.yaml requires an `infra.spo_node.blockfrost_id` field
+    # not set here, so it crash-loops on boot ("missing field blockfrost_id").
+    # 4.0.1 is the last pre-bridge release that boots against this node/proof
+    # server. The indexer version does not affect decoded tx content (raw bytes
+    # are captured at submit time); it only needs to confirm txs and sync.
+    image: 'midnightntwrk/indexer-standalone:4.0.1'
     container_name: indexer_$TESTCONTAINERS_UID
     ports:
       - '8088'
