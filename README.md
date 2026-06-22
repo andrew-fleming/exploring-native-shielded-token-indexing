@@ -15,29 +15,40 @@ deploy ──▶ mint (1,000,000) ──▶ burn (400,000, change 600,000) ─�
 
 ## TL;DR — can you hide the burnt amount of a shielded token?
 
-**Yes, but only if you burn *outside* the contract.** A contract-mediated burn
-always reveals the amount to the indexer. A direct wallet → burn-address Zswap
-transfer hides it inside a Pedersen commitment. We proved both ends on a live
+**Yes. What leaks a burn's amount is public supply accounting, not the burn
+itself.** A burn moves a coin to an unspendable address. At the coin level that
+is an ordinary shielded transfer, so the value stays sealed in a Pedersen
+commitment. OpenZeppelin's `ShieldedERC20.burn` does reveal the amount, but only
+because it writes the `_totalSupply` ledger cell in the clear, not because of the
+coin operations. Remove that write (the counter-free experiment below) or burn
+outside the contract, and the amount is hidden. We proved every case on a live
 local v8 stack and decoded the raw bytes.
 
-| | Mint (via contract) | Contract `burn` | Direct wallet burn |
-|---|---|---|---|
-| Path | `mint` circuit | `burn` circuit | plain Zswap transfer to the zero coin key |
-| Amount visible to indexer | **yes** (`shieldedMints` effect) | **yes** (`disclose`d into the public VM transcript) | **no** (only a Pedersen commitment) |
-| Coin owner / recipient | hidden | hidden | hidden |
-| Contract can count it (`totalBurned`) | n/a | yes | **no** (invisible to the contract) |
-| `disclose` required in Compact | yes | yes | n/a (no contract code runs) |
+| | Mint (via contract) | Contract `burn` (`ShieldedERC20`) | Contract `burn` (`NoSupplyToken`) | Direct wallet burn |
+|---|---|---|---|---|
+| Path | `mint` circuit | `burn` circuit | `burn` circuit, no `_totalSupply` write | plain Zswap transfer to the zero coin key |
+| Amount visible to indexer | **yes** (`shieldedMints` effect) | **yes**, via the public `_totalSupply` write (not the coin ops) | **no** (only commitments / nullifiers) | **no** (only a Pedersen commitment) |
+| Coin owner / recipient | hidden | hidden | hidden | hidden |
+| Contract can count it (`totalSupply`) | yes | yes | **no** (gave up the counter) | **no** (invisible to the contract) |
+| `disclose` required in Compact | yes | yes | yes (unchanged) | n/a (no contract code runs) |
 
-**Why a contract can't hide it.** Spending or receiving a shielded coin inside a
-contract (`receiveShielded`, `sendImmediateShielded`, `sendShielded`) builds a
-public commitment/nullifier from the coin and writes its value into the public VM
-transcript. The Compact compiler *forces* `disclose` on all three. Removing the
-total-supply counter does not change this. We tried, and it fails to compile with
-53 disclosure errors (see
-[the experiment below](#experiment-can-removing-total-supply-let-us-drop-disclose-from-burn)).
+**What actually leaks it.** Spending or receiving a shielded coin inside a
+contract (`receiveShielded`, `sendImmediateShielded`, `sendShielded`) emits only a
+commitment and a nullifier, both hashes of the coin and never its plaintext value.
+The Compact compiler *forces* `disclose` on all three, but `disclose` is a
+compile-time permission marker, not a disclosure: it lets a value reach a sink, it
+does not put it there. The amount becomes public only when the contract writes it
+to a public sink. In `ShieldedERC20.burn` that sink is the `_totalSupply` ledger
+cell (`_totalSupply = _totalSupply - disclose(amount)`). Remove that write and the
+burn reveals nothing but hashes. The counter-free
+[`NoSupplyToken`](./contracts/experiments/NoSupplyToken.compact) experiment below
+proves it, cross-checked against the decoded bytes in
+[`DISCLOSE-CLAIM-REVIEW.md`](./DISCLOSE-CLAIM-REVIEW.md).
 
-**The trade-off.** A hidden burn never touches the contract, so `totalBurned` can
-only ever be a lower bound on circulating supply.
+**The trade-off.** Hiding the amount means giving up a public supply counter: a
+globally auditable `totalSupply` has to be a public ledger cell, and that cell is
+exactly what leaks. An off-contract hidden burn never touches the contract at all,
+so a `totalBurned` counter could only ever be a lower bound on circulating supply.
 
 Evidence: [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDEN-BURN-VIEW.md) (amount hidden,
 `pnpm hidden-burn`) vs [`out/INDEXER-VIEW.md`](./out/INDEXER-VIEW.md) (contract
@@ -168,24 +179,31 @@ Decoding the raw bytes shows what an indexer ingests. For this archived
 | Public VM transcript + gas | Dust balance (only a nullifier + commitment) |
 | A ZK proof is attached | What the proof proves |
 
-**Amount visibility depends on the circuit.** In this contract:
+**Amount visibility depends on what the circuit writes to public state.** In this
+contract:
 
-- **mint** publishes the amount in the transcript's `shieldedMints` effect.
-- **burn** calls `disclose(coin)` / `disclose(amount)`, so the coin value
-  (1,000,000) and change (600,000) appear as literals in the public transcript —
-  the burned amount (400,000) is therefore derivable.
+- **mint** publishes the amount in the transcript's `shieldedMints` effect. This
+  is a protocol-level disclosure of token issuance, unavoidable from contract code.
+- **burn** writes the `_totalSupply` ledger cell: the decode shows the old value
+  (1,000,000) and new value (600,000) as plaintext `b16` literals at ledger field
+  2, so the burned amount (400,000) is derivable as old − new. The `disclose`'d
+  coin operations themselves emit only `b32` commitments and nullifiers (hashes)
+  and carry no plaintext amount.
 
-So both mint and burn leak the *amount* here; only the coin *owners* stay
-hidden. A future amount-private burn would need to avoid disclosing the coin
-value and change to the public transcript.
+So mint always leaks the amount, but burn leaks it *only* because of the
+`_totalSupply` write. An amount-private burn just has to avoid writing the amount
+to public state: drop the counter, or burn off-contract.
 
-## Experiment: can removing total supply let us drop `disclose` from burn?
+## Experiment: what actually makes the burn amount public?
 
-Short answer: **no.** The `disclose` on the burn is not there for the supply
-counter. It is forced by the shielded coin operations themselves.
+The original claim conflated two separate things: *"`disclose` is required on the
+coin ops"* and *"the amount is therefore public."* Two experiments pull them apart.
 
-Reproduce it with a tiny standalone probe,
-[`contracts/experiments/disclose-probe.compact`](./contracts/experiments/disclose-probe.compact),
+### 1. `disclose` is required regardless of the supply counter
+
+The `disclose` on the burn is **not** there for the supply counter; it is forced
+by the shielded coin operations themselves. Reproduce with a tiny standalone
+probe, [`contracts/experiments/disclose-probe.compact`](./contracts/experiments/disclose-probe.compact),
 which calls each coin spend/receive primitive on a witness value (a circuit
 parameter) WITHOUT `disclose`, using the normal compact command:
 
@@ -220,26 +238,52 @@ Exception: disclose-probe.compact line 35 char 3:
       of nullifier and the coin with the nullifier given by a hash of the witness value
 ```
 
-The same holds inside the real `ShieldedERC20.burn`: removing `_totalSupply`
-(the ledger field, its `totalSupply()` circuit, and the `_totalSupply = …`
-writes) and then dropping `disclose` from the coin ops makes it fail to compile
-with 53 such disclosure errors. The committed `contracts/` are left as the
-working originals; only the standalone probe is kept, as a minimal repro.
+The same holds inside the real `ShieldedERC20.burn`: removing `_totalSupply` *and
+then also* dropping `disclose` from the coin ops fails to compile with 53 such
+disclosure errors. That proves the `disclose` requirement is independent of the
+counter. It does **not** prove the amount is public: a required `disclose` only
+means the value *could* reach a sink, never that it does.
 
-**Why.** Spending or receiving a shielded coin inside a contract produces a
-public commitment and nullifier that are a hash *of the coin* — including its
-value. The compiler makes you `disclose` that the public commitment/nullifier is
-derived from the (private) coin. And the operation writes the coin value into
-the public VM transcript regardless: in the baseline burn the *change*-send
-carries no `disclose` yet `600000` still shows up as a literal. So in any
-contract-mediated burn the amount is public. **Total-supply accounting is
-irrelevant to it.**
+### 2. The leak is the `_totalSupply` write, not the coin ops
 
-**The only way to hide a burnt amount** is to burn *outside* the contract: a
-plain wallet → burn-address Zswap transfer, where the value lives only inside a
-Pedersen commitment (hidden, like any user-to-user transfer). The trade-off is
-that the contract can no longer see or count it. `src/hidden-burn.ts` runs
-exactly that and decodes the result; see [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDEN-BURN-VIEW.md).
+[`NoSupplyToken`](./contracts/experiments/NoSupplyToken.compact) is
+`ShieldedERC20.burn` with exactly one change: the `_totalSupply` field, its
+`totalSupply()` circuit, and the `_totalSupply = _totalSupply - disclose(amount)`
+write are removed. Every coin operation and **every `disclose` wrapper is kept
+byte-for-byte**, and it still compiles. Run the same scenario (mint 1,000,000 →
+burn 400,000) against both and decode the burn tx from its raw bytes:
+
+| burn tx | plaintext (`b16`) amount literals | `bytesWritten` |
+|---|---|---|
+| `ShieldedERC20` (`out/3-burn.decode.txt`) | `40420f` = 1,000,000 and `c02709` = 600,000, both at the `_totalSupply` cell (ledger field 2) | 663 |
+| `NoSupplyToken` (`out/ns-3-burn.decode.txt`) | **none** — every op is a `b32` commitment / nullifier | 0 |
+
+```bash
+pnpm reproduce                       # baseline ShieldedERC20 burn -> out/3-burn.decode.txt
+pnpm compile:no-supply               # build the counter-free contract (full ZK)
+bash scripts/run-no-supply-burn.sh   # NoSupplyToken burn -> out/ns-3-burn.decode.txt
+grep -oE '40420f|c02709' out/3-burn.decode.txt      # ShieldedERC20: both present (at _totalSupply)
+grep -oE '40420f|c02709' out/ns-3-burn.decode.txt   # NoSupplyToken: nothing
+```
+
+Same coin ops, same `disclose` wrappers, same amounts. The **only** difference is
+the `_totalSupply` write, and it is the **only** thing that put a plaintext amount
+in the public transcript. The `600000` literal in the baseline burn is the *new
+`_totalSupply` value* (1,000,000 − 400,000), not the change-send coin: the
+change-send produces a commitment, like every other coin op. Full byte-level
+write-up in [`DISCLOSE-CLAIM-REVIEW.md`](./DISCLOSE-CLAIM-REVIEW.md).
+
+**So there are two ways to hide a burnt amount:**
+
+1. **Inside a contract**, by not writing the amount to public state — e.g. drop
+   the `_totalSupply` cell, as `NoSupplyToken` does. The burn still runs in the
+   contract; it just can no longer keep a public supply counter.
+2. **Outside the contract**, with a plain wallet → burn-address Zswap transfer,
+   where the value lives only inside a Pedersen commitment. `src/hidden-burn.ts`
+   runs exactly that; see [`out/HIDDEN-BURN-VIEW.md`](./out/HIDDEN-BURN-VIEW.md).
+
+Both hide the amount, and both give up the contract's ability to publicly count
+the burn.
 
 ## How it works
 
